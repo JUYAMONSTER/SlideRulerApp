@@ -4,9 +4,11 @@ import android.Manifest
 import android.content.pm.PackageManager
 import android.opengl.GLES20
 import android.opengl.GLSurfaceView
+import android.opengl.Matrix
 import android.os.Bundle
 import android.util.Log
 import android.view.MotionEvent
+import android.view.View
 import android.widget.TextView
 import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
@@ -36,6 +38,8 @@ class ARMeasureActivity : AppCompatActivity(), GLSurfaceView.Renderer {
     private val objectRenderer = ObjectRenderer()
     private val planeRenderer = PlaneRenderer()
     private val lineRenderer = LineRenderer()
+    // ▼▼▼ 1. TextRenderer 변수 완전 삭제 ▼▼▼
+    // private val textRenderer = TextRenderer()
 
     private val anchors = ArrayList<Anchor>()
     private val queuedTaps = ConcurrentLinkedQueue<MotionEvent>()
@@ -80,6 +84,9 @@ class ARMeasureActivity : AppCompatActivity(), GLSurfaceView.Renderer {
                 when (ArCoreApk.getInstance().requestInstall(this, userRequestedInstall)) {
                     ArCoreApk.InstallStatus.INSTALLED -> {
                         arSession = Session(this)
+                        val config = Config(arSession)
+                        config.planeFindingMode = Config.PlaneFindingMode.HORIZONTAL_AND_VERTICAL
+                        arSession!!.configure(config)
                     }
                     ArCoreApk.InstallStatus.INSTALL_REQUESTED -> {
                         userRequestedInstall = false
@@ -100,7 +107,6 @@ class ARMeasureActivity : AppCompatActivity(), GLSurfaceView.Renderer {
             if (config.focusMode != Config.FocusMode.AUTO) {
                 config.focusMode = Config.FocusMode.AUTO
             }
-            config.planeFindingMode = Config.PlaneFindingMode.HORIZONTAL_AND_VERTICAL
             arSession!!.configure(config)
 
             val cameraConfigs = arSession!!.supportedCameraConfigs
@@ -133,6 +139,8 @@ class ARMeasureActivity : AppCompatActivity(), GLSurfaceView.Renderer {
         objectRenderer.createOnGlThread(this)
         planeRenderer.createOnGlThread(this)
         lineRenderer.createOnGlThread(this)
+        // ▼▼▼ 2. TextRenderer 초기화 코드 완전 삭제 ▼▼▼
+        // textRenderer.createOnGlThread()
     }
 
     override fun onSurfaceChanged(gl: GL10?, width: Int, height: Int) {
@@ -168,15 +176,34 @@ class ARMeasureActivity : AppCompatActivity(), GLSurfaceView.Renderer {
 
                 planeRenderer.drawPlanes(session.getAllTrackables(Plane::class.java), viewMatrix, projectionMatrix)
 
-                if (anchors.size >= 2) {
-                    val distance = calculateDistance(anchors[0].pose, anchors[1].pose)
-                    updateDistanceText(distance)
-                    lineRenderer.draw(anchors[0].pose, anchors[1].pose, viewMatrix, projectionMatrix, floatArrayOf(1.0f, 1.0f, 0.0f, 1.0f))
-                }
-
                 for (anchor in anchors) {
                     if (anchor.trackingState == TrackingState.TRACKING) {
                         objectRenderer.draw(anchor, viewMatrix, projectionMatrix, floatArrayOf(1.0f, 0.0f, 0.0f, 1.0f))
+                    }
+                }
+
+                // ▼▼▼ 3. TextRenderer 관련 로직을 모두 2D UI 로직으로 변경 ▼▼▼
+                if (anchors.size == 2) {
+                    val start = anchors[0]
+                    val end = anchors[1]
+
+                    lineRenderer.draw(start.pose, end.pose, viewMatrix, projectionMatrix, floatArrayOf(1.0f, 1.0f, 0.0f, 1.0f))
+
+                    val distance = calculateDistance(start.pose, end.pose)
+                    val distanceTextValue = "%.1f cm".format(distance * 100)
+
+                    val midPose = getMiddlePose(start.pose, end.pose)
+                    val screenPoint = worldToScreen(midPose, camera, viewportWidth, viewportHeight)
+
+                    runOnUiThread {
+                        distanceText.visibility = View.VISIBLE
+                        distanceText.text = distanceTextValue
+                        distanceText.x = screenPoint[0]
+                        distanceText.y = screenPoint[1]
+                    }
+                } else {
+                    runOnUiThread {
+                        distanceText.visibility = View.GONE
                     }
                 }
             }
@@ -190,11 +217,13 @@ class ARMeasureActivity : AppCompatActivity(), GLSurfaceView.Renderer {
         try {
             if (frame.camera.trackingState == TrackingState.TRACKING) {
                 for (hit in frame.hitTest(tap)) {
-                    if (hit.trackable is Plane && (hit.trackable as Plane).isPoseInPolygon(hit.hitPose)) {
+                    val trackable = hit.trackable
+                    if ((trackable is Plane && trackable.isPoseInPolygon(hit.hitPose)) ||
+                        (trackable is Point && trackable.orientationMode == Point.OrientationMode.ESTIMATED_SURFACE_NORMAL)) {
+
                         if (anchors.size >= 2) {
                             anchors.forEach { it.detach() }
                             anchors.clear()
-                            updateDistanceText(0f)
                         }
                         anchors.add(hit.createAnchor())
                         break
@@ -206,6 +235,13 @@ class ARMeasureActivity : AppCompatActivity(), GLSurfaceView.Renderer {
         }
     }
 
+    private fun getMiddlePose(p1: Pose, p2: Pose): Pose {
+        val midX = (p1.tx() + p2.tx()) / 2
+        val midY = (p1.ty() + p2.ty()) / 2
+        val midZ = (p1.tz() + p2.tz()) / 2
+        return Pose.makeTranslation(midX, midY, midZ)
+    }
+
     private fun calculateDistance(pose1: Pose, pose2: Pose): Float {
         val dx = pose1.tx() - pose2.tx()
         val dy = pose1.ty() - pose2.ty()
@@ -213,14 +249,29 @@ class ARMeasureActivity : AppCompatActivity(), GLSurfaceView.Renderer {
         return sqrt(dx.pow(2) + dy.pow(2) + dz.pow(2))
     }
 
-    private fun updateDistanceText(distanceMeters: Float) {
-        val distanceCm = distanceMeters * 100
-        runOnUiThread {
-            distanceText.text = String.format(Locale.getDefault(), "%.1f cm", distanceCm)
-        }
+    // ▼▼▼ 4. 누락되었던 worldToScreen 함수 추가 ▼▼▼
+    private fun worldToScreen(worldPose: Pose, camera: Camera, width: Int, height: Int): FloatArray {
+        val projectionMatrix = FloatArray(16)
+        camera.getProjectionMatrix(projectionMatrix, 0, 0.1f, 100f)
+        val viewMatrix = FloatArray(16)
+        camera.getViewMatrix(viewMatrix, 0)
+
+        val worldCoord = floatArrayOf(worldPose.tx(), worldPose.ty(), worldPose.tz(), 1f)
+        val ndcCoord = FloatArray(4)
+        Matrix.multiplyMV(ndcCoord, 0, viewMatrix, 0, worldCoord, 0)
+        Matrix.multiplyMV(ndcCoord, 0, projectionMatrix, 0, ndcCoord, 0)
+
+        val w = ndcCoord[3]
+        ndcCoord[0] /= w
+        ndcCoord[1] /= w
+
+        return floatArrayOf(
+            (ndcCoord[0] + 1.0f) * 0.5f * width,
+            (1.0f - ndcCoord[1]) * 0.5f * height
+        )
     }
 
-    // ▼▼▼ 172줄 오류 수정: return true 추가 ▼▼▼
+    // ▼▼▼ 5. 누락되었던 함수들의 전체 내용 복원 ▼▼▼
     private fun requestCameraPermission(): Boolean {
         if (ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA) != PackageManager.PERMISSION_GRANTED) {
             ActivityCompat.requestPermissions(this, arrayOf(Manifest.permission.CAMERA), 0)
@@ -229,7 +280,6 @@ class ARMeasureActivity : AppCompatActivity(), GLSurfaceView.Renderer {
         return true
     }
 
-    // ▼▼▼ 182줄 오류 수정: super 호출 추가 ▼▼▼
     override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<String>, grantResults: IntArray) {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults)
         if (grantResults.isNotEmpty() && grantResults[0] == PackageManager.PERMISSION_GRANTED) {
