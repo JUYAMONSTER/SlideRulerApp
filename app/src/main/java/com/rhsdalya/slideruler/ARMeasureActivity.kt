@@ -12,16 +12,7 @@ import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
-import com.google.ar.core.Anchor
-import com.google.ar.core.ArCoreApk
-import com.google.ar.core.CameraConfig
-import com.google.ar.core.Config // ◀◀◀ 이 import 문이 추가되었습니다!
-import com.google.ar.core.Frame
-import com.google.ar.core.HitResult
-import com.google.ar.core.Plane
-import com.google.ar.core.Pose
-import com.google.ar.core.Session
-import com.google.ar.core.TrackingState
+import com.google.ar.core.*
 import com.google.ar.core.exceptions.CameraNotAvailableException
 import com.google.ar.core.exceptions.UnavailableException
 import java.util.Locale
@@ -89,10 +80,6 @@ class ARMeasureActivity : AppCompatActivity(), GLSurfaceView.Renderer {
                 when (ArCoreApk.getInstance().requestInstall(this, userRequestedInstall)) {
                     ArCoreApk.InstallStatus.INSTALLED -> {
                         arSession = Session(this)
-                        // ▼▼▼ Config 클래스를 사용하여 평면 감지 기능을 켭니다. ▼▼▼
-                        val config = Config(arSession)
-                        config.planeFindingMode = Config.PlaneFindingMode.HORIZONTAL_AND_VERTICAL
-                        arSession!!.configure(config)
                     }
                     ArCoreApk.InstallStatus.INSTALL_REQUESTED -> {
                         userRequestedInstall = false
@@ -106,6 +93,16 @@ class ARMeasureActivity : AppCompatActivity(), GLSurfaceView.Renderer {
         }
 
         try {
+            val config = Config(arSession)
+            if (arSession!!.isDepthModeSupported(Config.DepthMode.AUTOMATIC)) {
+                config.depthMode = Config.DepthMode.AUTOMATIC
+            }
+            if (config.focusMode != Config.FocusMode.AUTO) {
+                config.focusMode = Config.FocusMode.AUTO
+            }
+            config.planeFindingMode = Config.PlaneFindingMode.HORIZONTAL_AND_VERTICAL
+            arSession!!.configure(config)
+
             val cameraConfigs = arSession!!.supportedCameraConfigs
             val bestConfig = cameraConfigs.filter { it.facingDirection == CameraConfig.FacingDirection.BACK }
                 .maxByOrNull { it.imageSize.width * it.imageSize.height }
@@ -114,6 +111,8 @@ class ARMeasureActivity : AppCompatActivity(), GLSurfaceView.Renderer {
             arSession!!.resume()
         } catch (e: CameraNotAvailableException) {
             showError("카메라를 사용할 수 없습니다.", e); return
+        } catch (e: Exception) {
+            showError("AR 세션 설정 또는 재개 중 오류 발생", e); return
         }
 
         surfaceView.onResume()
@@ -221,10 +220,16 @@ class ARMeasureActivity : AppCompatActivity(), GLSurfaceView.Renderer {
         }
     }
 
-    private fun requestCameraPermission() {
-        ActivityCompat.requestPermissions(this, arrayOf(Manifest.permission.CAMERA), 0)
+    // ▼▼▼ 172줄 오류 수정: return true 추가 ▼▼▼
+    private fun requestCameraPermission(): Boolean {
+        if (ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA) != PackageManager.PERMISSION_GRANTED) {
+            ActivityCompat.requestPermissions(this, arrayOf(Manifest.permission.CAMERA), 0)
+            return false
+        }
+        return true
     }
 
+    // ▼▼▼ 182줄 오류 수정: super 호출 추가 ▼▼▼
     override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<String>, grantResults: IntArray) {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults)
         if (grantResults.isNotEmpty() && grantResults[0] == PackageManager.PERMISSION_GRANTED) {
